@@ -87,14 +87,14 @@ fun main(args: Array<String>) {
     }
 
     // issue few commands
-    val newId = commandDispatcher.invokeCommand<UUID>(CreateCounterCommand(UUID.randomUUID())) // calling this command expects result
+    val newId : UUID = commandDispatcher.invokeCommandWithResult(CreateCounterCommand(UUID.randomUUID())) // calling this command expects result
     commandDispatcher.invokeCommand(SetCounterLimitCommand(newId, 60))
 
     logger.info { "New aggregate created with id $newId and count ${domainStore.getById(CounterAggregate::class, newId).getCount()}" }
 
     (1..5).forEach {
         // we don't need to care about internal logic (limit of the aggregate in this case)
-        val commandResult = commandDispatcher.invokeCommand<Long>(IncreaseCounterCommand(newId, it.toLong()))
+        val commandResult: Long = commandDispatcher.invokeCommandWithResult(IncreaseCounterCommand(newId, it.toLong()))
         logger.info {"Result of command increasing $newId by $it : $commandResult"}
         logger.info { "Aggregate $newId value from domainStore: ${domainStore.getById(CounterAggregate::class, newId).getCount()}" }
     }
@@ -103,7 +103,9 @@ fun main(args: Array<String>) {
 
     // intentionally do something wrong
     commandDispatcher.invokeCommand(SetCounterLimitCommand(newId, 0))
+    eventStore.events.forEach { logger.info {it} }
     commandDispatcher.invokeCommand(IncreaseCounterCommand(newId))
+
 
 }
 
