@@ -13,14 +13,13 @@ public class TestGame {
         long startTime = System.nanoTime();
 
         EventStore eventStore = new EventStore();
-        DomainStore domainStore = new DomainStore(eventStore);
+        DomainStore domainStore = new DomainStoreCommandAware(new DomainStoreSimple(eventStore));
         CommandDispatcher commandDispatcher = new CommandDispatcher(eventStore);
 
         commandDispatcher.registerHandler(JvmClassMappingKt.getKotlinClass(CreateGameCommand.class), new CommandHandler<CreateGameCommand, UUID>() {
             @Override
             public UUID handleCommand(CreateGameCommand command) {
-                GameAggregate game = new GameAggregate(UUID.randomUUID());
-                return game.getAggregateId();
+            	return domainStore.add(new GameAggregate(UUID.randomUUID())).getAggregateId();
             }
         });
         commandDispatcher.registerHandler(JvmClassMappingKt.getKotlinClass(StartGameCommand.class), new CommandHandler<StartGameCommand, Unit>() {

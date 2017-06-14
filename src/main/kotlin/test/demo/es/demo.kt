@@ -3,6 +3,10 @@ package test.demo.es
 import mu.KotlinLogging
 import java.lang.IllegalArgumentException
 import java.util.*
+import java.util.concurrent.Future
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorCompletionService
 
 //////////////////////////////
 // Show time
@@ -62,17 +66,19 @@ data class IncreaseCounterCommand(val id: UUID, val by: Long = 1)
 data class ResetCounterAndLimitCommand(val id: UUID)
 
 fun main(args: Array<String>) {
-    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "TRACE")
+    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "INFO")
 
     val logger = KotlinLogging.logger {}
 
     // create components
     val eventStore : EventStore = EventStore()
-    val domainStore: DomainStore = DomainStore(eventStore)
+    val domainStore: DomainStore = DomainStoreCommandAware(DomainStoreSimple(eventStore))
     val commandDispatcher = CommandDispatcher(eventStore)
 
     // register command handlers
-    commandDispatcher.registerHandler(CreateCounterCommand::class) { CounterAggregate(it.id).aggregateId }
+    commandDispatcher.registerHandler(CreateCounterCommand::class) {
+		domainStore.add(CounterAggregate(it.id)).aggregateId
+	}
     commandDispatcher.registerHandler(SetCounterLimitCommand::class) { domainStore.getById(CounterAggregate::class, it.id).setLimit(it.limit) }
     commandDispatcher.registerHandler(ResetCounterAndLimitCommand::class) { command ->
         domainStore.getById(CounterAggregate::class, command.id).let {
@@ -88,24 +94,31 @@ fun main(args: Array<String>) {
 
     // issue few commands
     val newId : UUID = commandDispatcher.invokeCommandWithResult(CreateCounterCommand(UUID.randomUUID())) // calling this command expects result
-    commandDispatcher.invokeCommand(SetCounterLimitCommand(newId, 60))
-
-    logger.info { "New aggregate created with id $newId and count ${domainStore.getById(CounterAggregate::class, newId).getCount()}" }
-
-    (1..5).forEach {
-        // we don't need to care about internal logic (limit of the aggregate in this case)
-        val commandResult: Long = commandDispatcher.invokeCommandWithResult(IncreaseCounterCommand(newId, it.toLong()))
-        logger.info {"Result of command increasing $newId by $it : $commandResult"}
-        logger.info { "Aggregate $newId value from domainStore: ${domainStore.getById(CounterAggregate::class, newId).getCount()}" }
-    }
-
-    commandDispatcher.invokeCommand(ResetCounterAndLimitCommand(newId))
-
-    // intentionally do something wrong
+    
+	
+	
+	val tasksCount = 16
+	val executor = Executors.newFixedThreadPool(8)
+	val completionService = ExecutorCompletionService<Unit>(executor);
+	
+    (1..tasksCount).forEach{
+		completionService.submit {
+			(1..1000).forEach{commandDispatcher.invokeCommandWithResult(IncreaseCounterCommand(newId))}
+			logger.info { "Aggregate $newId value from domainStore: ${domainStore.getById(CounterAggregate::class, newId).getCount()} with events count: ${eventStore.getEvents(newId).size}" }
+		}
+	}
+	
+	(1..tasksCount).forEach{
+		completionService.take()
+	}
+	executor.shutdown()
+	
+	// intentionally do something wrong
     commandDispatcher.invokeCommand(SetCounterLimitCommand(newId, 0))
-    eventStore.events.forEach { logger.info {it} }
+//    eventStore.events.forEach { logger.info {it} }
     commandDispatcher.invokeCommand(IncreaseCounterCommand(newId))
 
 
+	
 }
 

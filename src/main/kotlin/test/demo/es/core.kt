@@ -5,25 +5,31 @@ import java.util.UUID
 import kotlin.reflect.KClass
 import java.lang.IllegalArgumentException
 import java.lang.reflect.Method
+import java.util.Collections
+import java.util.concurrent.CopyOnWriteArrayList
 
 /////////////////
 /// Event sourcing
 /////////////////
 open class Event(val aggregateId: UUID)
 
+
 open class Aggregate() {
-	var aggregateId: UUID = UUID.nameUUIDFromBytes(ByteArray(0))
-
+	
+	var aggregateId = UUID.nameUUIDFromBytes(ByteArray(0))
+			protected set
+	
 	val eventHandlerMethodCache : MutableMap<Class<Event>, Method> = mutableMapOf()
-
-	fun applyEvent(event: Event) {
-		CommandEvents.applyEvent(event)
-		this.handleEvent(event)
-	}
-
 	fun handleEvent(event: Event) {
 		eventHandlerMethodCache.getOrPut(event.javaClass) { this.javaClass.declaredMethods.single { it.parameterCount==1 && it.parameterTypes[0]==event.javaClass }}.invoke(this, event)
 	}
+	
+	val newEvents : MutableList<Event> = mutableListOf()
+	fun applyEvent(event: Event) {
+		newEvents.add(event)
+		this.handleEvent(event)
+	}
+
 }
 
 
@@ -35,7 +41,7 @@ class EventStore {
     private val logger = KotlinLogging.logger {}
 
     //in memory
-	val events: MutableList<StoredEvent> = mutableListOf();
+	val events: MutableList<StoredEvent> = Collections.synchronizedList(CopyOnWriteArrayList())
 	
 	fun getEvents(aggregateId: UUID) : List<StoredEvent> = events.filter { it.aggregateId==aggregateId }
 	
@@ -51,9 +57,14 @@ class EventStore {
 	
 }
 
-class DomainStore(val eventStore: EventStore) {
+interface DomainStore {
+	fun <T : Aggregate> getById(aggregateClass: KClass<T>, aggregateId: UUID) : T
+	fun <T : Aggregate> add(aggregate : T) : T	
+}
 
-	fun <T : Aggregate> getById(aggregateClass: KClass<T>, aggregateId: UUID) : T {
+class DomainStoreSimple(val eventStore: EventStore) : DomainStore {
+
+	override fun <T : Aggregate> getById(aggregateClass: KClass<T>, aggregateId: UUID) : T {	
 		val events = eventStore.getEvents(aggregateId)
 		if (events.isNotEmpty()) {
 			val newAggregate: T = aggregateClass.java.newInstance()
@@ -63,6 +74,11 @@ class DomainStore(val eventStore: EventStore) {
 		throw IllegalArgumentException("Aggregate $aggregateId not found")
 	}
 
+	override fun <T : Aggregate> add(aggregate : T) : T {
+		eventStore.store(aggregate.newEvents)
+		return aggregate
+	}	
+	
 }
 
 ///////////////////////
@@ -70,28 +86,47 @@ class DomainStore(val eventStore: EventStore) {
 ///////////////////////
 
 // mix in threads
-object CommandEvents {
-
-    class CommandEventsData(val events: MutableList<Event> = mutableListOf(), var aggregateId: UUID? = null) {
-        fun addEvent(event: Event) {
-            if (events.isEmpty()) aggregateId = event.aggregateId
-            if (event.aggregateId != aggregateId) throw IllegalArgumentException("Can't accept another aggregate event")
-            events.add(event)
-        }
-    }
-
-	private val eventsData = ThreadLocal<CommandEventsData>()
-
-	fun clear() {
-        eventsData.set(CommandEventsData())
-    }
+class CommandUnitOfWork private constructor() {
 	
-	fun applyEvent(e: Event) {
-        eventsData.get().addEvent(e)
-    }
-
-	fun getEvents() = eventsData.get().events
+	private object Holder {
+		val INSTANCE = ThreadLocal.withInitial {CommandUnitOfWorkData()}
+	}
+	
+	companion object {
+		val current : CommandUnitOfWorkData
+			get() = Holder.INSTANCE.get()				
+	}
+			
+	class CommandUnitOfWorkData() {
+		
+		val aggregates : MutableMap<UUID, Aggregate> = mutableMapOf()
+		
+		val events : List<Event>
+			get() = aggregates.values.flatMap { it.newEvents }
+		
+		fun clear() {
+			Holder.INSTANCE.remove()
+		}
+		
+	}	
+			
+	
 }
+
+class DomainStoreCommandAware(val wrappedDomainStore: DomainStore) : DomainStore {
+
+	@Suppress("UNCHECKED_CAST")
+	override fun <T : Aggregate> getById(aggregateClass: KClass<T>, aggregateId: UUID) : T {
+		return CommandUnitOfWork.current.aggregates.getOrPut(aggregateId) {wrappedDomainStore.getById(aggregateClass, aggregateId)} as T
+	}
+
+	override fun <T : Aggregate> add(aggregate : T) : T {
+		CommandUnitOfWork.current.aggregates.put(aggregate.aggregateId, aggregate)
+		return aggregate
+	}
+	
+}
+
 
 
 interface CommandHandler<T, R> {
@@ -118,16 +153,16 @@ class CommandDispatcher(val eventStore: EventStore) {
 	}
 
 	fun <R: Any> invokeCommandWithResult(command: Any) : R {
-        CommandEvents.clear()
+        CommandUnitOfWork.current.clear()
         try {
             val handler = handlers.getOrElse(command::class) {throw IllegalArgumentException("Command handler is not registered for $command") } as CommandHandler<Any, R>
             logger.debug { "Handling command $command" }
             val commandResult = handler.handleCommand(command)
-            logger.debug { "Command $command generated events ${CommandEvents.getEvents()}" }
-            CommandEvents.getEvents().let(eventStore::store)
+            logger.debug { "Command $command generated events ${CommandUnitOfWork.current.events}" }
+            CommandUnitOfWork.current.events.let(eventStore::store)
             return commandResult
         } finally {
-            CommandEvents.clear()
+            CommandUnitOfWork.current.clear()
         }
 	}
 
