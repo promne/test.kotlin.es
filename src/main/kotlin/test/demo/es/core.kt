@@ -7,6 +7,10 @@ import java.lang.IllegalArgumentException
 import java.lang.reflect.Method
 import java.util.Collections
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.Lock
+import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.TimeUnit
 
 /////////////////
 /// Event sourcing
@@ -88,23 +92,35 @@ class DomainStoreSimple(val eventStore: EventStore) : DomainStore {
 // mix in threads
 class CommandUnitOfWork private constructor() {
 	
+		
 	private object Holder {
 		val INSTANCE = ThreadLocal.withInitial {CommandUnitOfWorkData()}
 	}
 	
 	companion object {
 		val current : CommandUnitOfWorkData
-			get() = Holder.INSTANCE.get()				
+			get() = Holder.INSTANCE.get()
+						
+		val locks: MutableMap<UUID, ReentrantLock> = ConcurrentHashMap()
 	}
 			
 	class CommandUnitOfWorkData() {
+		private val logger = KotlinLogging.logger {}
 		
 		val aggregates : MutableMap<UUID, Aggregate> = mutableMapOf()
+		
+		val lockIds: MutableList<UUID> = mutableListOf()
 		
 		val events : List<Event>
 			get() = aggregates.values.flatMap { it.newEvents }
 		
 		fun clear() {
+			lockIds.forEach { aggregateId ->
+				locks.get(aggregateId)?.let { lock ->
+					while (lock.isHeldByCurrentThread) lock.unlock()
+					logger.trace {"Released lock for aggregate $aggregateId"}
+				}
+			}
 			Holder.INSTANCE.remove()
 		}
 		
@@ -114,9 +130,18 @@ class CommandUnitOfWork private constructor() {
 }
 
 class DomainStoreCommandAware(val wrappedDomainStore: DomainStore) : DomainStore {
+	
+	val defaultLockTimeout : Long = 3000
+	
+    private val logger = KotlinLogging.logger {}	
 
 	@Suppress("UNCHECKED_CAST")
 	override fun <T : Aggregate> getById(aggregateClass: KClass<T>, aggregateId: UUID) : T {
+		val lock = CommandUnitOfWork.locks.computeIfAbsent(aggregateId) {ReentrantLock()}
+//		lock.tryLock(defaultLockTimeout, TimeUnit.MILLISECONDS)
+		lock.lock()
+		logger.trace { "Acquired lock $lock for aggregate $aggregateId with hold count ${lock.holdCount}" }
+		CommandUnitOfWork.current.lockIds.add(aggregateId)
 		return CommandUnitOfWork.current.aggregates.getOrPut(aggregateId) {wrappedDomainStore.getById(aggregateClass, aggregateId)} as T
 	}
 

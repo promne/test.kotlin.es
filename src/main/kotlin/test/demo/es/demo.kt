@@ -66,13 +66,16 @@ data class IncreaseCounterCommand(val id: UUID, val by: Long = 1)
 data class ResetCounterAndLimitCommand(val id: UUID)
 
 fun main(args: Array<String>) {
-    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "INFO")
+//    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "TRACE")
+    System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "HH:mm:ss.SSS")
+    System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")
 
     val logger = KotlinLogging.logger {}
-
+	
     // create components
     val eventStore : EventStore = EventStore()
-    val domainStore: DomainStore = DomainStoreCommandAware(DomainStoreSimple(eventStore))
+	val domainStoreSimple: DomainStore = DomainStoreSimple(eventStore)
+    val domainStore: DomainStore = DomainStoreCommandAware(domainStoreSimple)
     val commandDispatcher = CommandDispatcher(eventStore)
 
     // register command handlers
@@ -86,25 +89,38 @@ fun main(args: Array<String>) {
             it.resetCounter()
         }
     }
-    commandDispatcher.registerHandler(IncreaseCounterCommand::class) {
+    commandDispatcher.registerHandler(IncreaseCounterCommand::class) {		
         val counterAggregate = domainStore.getById(CounterAggregate::class, it.id)
         counterAggregate.increase(it.by)
         counterAggregate.getCount()
     }
 
     // issue few commands
-    val newId : UUID = commandDispatcher.invokeCommandWithResult(CreateCounterCommand(UUID.randomUUID())) // calling this command expects result
-    
-	
-	
-	val tasksCount = 16
+	val aggregateCount = 5
+    val tasksCount = 400
+    val iterationsPerTask = 500
 	val executor = Executors.newFixedThreadPool(8)
 	val completionService = ExecutorCompletionService<Unit>(executor);
+
+	
+	val counterIds : List<UUID> = (1..aggregateCount).asIterable()
+			.map{UUID.randomUUID()}
+			.map(::CreateCounterCommand)
+			.map{ commandDispatcher.invokeCommandWithResult<UUID>(it) }		
 	
     (1..tasksCount).forEach{
 		completionService.submit {
-			(1..1000).forEach{commandDispatcher.invokeCommandWithResult(IncreaseCounterCommand(newId))}
-			logger.info { "Aggregate $newId value from domainStore: ${domainStore.getById(CounterAggregate::class, newId).getCount()} with events count: ${eventStore.getEvents(newId).size}" }
+			val taskStartTime = System.currentTimeMillis()
+			(1..iterationsPerTask).forEach{
+				counterIds.map { cid -> IncreaseCounterCommand(cid) }.forEach(commandDispatcher::invokeCommand)
+			}
+			val taskRunTime = System.currentTimeMillis() - taskStartTime
+			counterIds.forEach {
+				logger.info { "Aggregate $it value from domainStore: ${domainStoreSimple.getById(CounterAggregate::class, it).getCount()} with events count: ${eventStore.getEvents(it).size}" }				
+			}
+			logger.info { "Event store size: ${eventStore.events.size}" }
+			logger.info { "Locks (${CommandUnitOfWork.locks.size}): ${CommandUnitOfWork.locks}" }
+			logger.info { "Task run time $taskRunTime ms" }
 		}
 	}
 	
@@ -113,10 +129,14 @@ fun main(args: Array<String>) {
 	}
 	executor.shutdown()
 	
+	logger.info { "Locks: ${CommandUnitOfWork.locks}" }
+	
+	
 	// intentionally do something wrong
-    commandDispatcher.invokeCommand(SetCounterLimitCommand(newId, 0))
-//    eventStore.events.forEach { logger.info {it} }
-    commandDispatcher.invokeCommand(IncreaseCounterCommand(newId))
+	counterIds[0].let {
+		SetCounterLimitCommand(it, 0).let(commandDispatcher::invokeCommand)
+		IncreaseCounterCommand(it).let(commandDispatcher::invokeCommand)
+	}
 
 
 	
