@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.Lock
 import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.TimeUnit
+import java.lang.reflect.Type
 
 /////////////////
 /// Event sourcing
@@ -18,7 +19,7 @@ import java.util.concurrent.TimeUnit
 open class Event(val aggregateId: UUID)
 
 
-open class Aggregate() {
+abstract class Aggregate() {
 	
 	var aggregateId = UUID.nameUUIDFromBytes(ByteArray(0))
 			protected set
@@ -45,19 +46,24 @@ class EventStore {
     private val logger = KotlinLogging.logger {}
 
     //in memory
-	val events: MutableList<StoredEvent> = Collections.synchronizedList(CopyOnWriteArrayList())
+	private val events: MutableMap<UUID, MutableList<StoredEvent>> = ConcurrentHashMap()
 	
-	fun getEvents(aggregateId: UUID) : List<StoredEvent> = events.filter { it.aggregateId==aggregateId }
+	private fun getAggregateEventsList(aggregateId: UUID) : MutableList<StoredEvent> = events.computeIfAbsent(aggregateId) { Collections.synchronizedList(ArrayList()) }
+	
+	fun getEvents(aggregateId: UUID, fromVersion: Int=0) : List<StoredEvent> = getAggregateEventsList(aggregateId).drop(fromVersion)
 	
 	fun store(allEvents: List<Event>) {
         allEvents.groupingBy { it.aggregateId }.fold(listOf<Event>()){ l,e -> l + e }.forEach { aggregateEvents ->
             StoredEvent(aggregateEvents.key, Timestamp(), aggregateEvents.value).let {
                 logger.trace { "Storing event $it" }
-                events.add(it);
+                getAggregateEventsList(it.aggregateId).add(it);
             }
         }
 
 	}
+	
+	val storeSize : Long
+			get() = events.values.map{ it.size }.fold(0, Long::plus)
 	
 }
 
@@ -83,6 +89,38 @@ class DomainStoreSimple(val eventStore: EventStore) : DomainStore {
 		return aggregate
 	}	
 	
+}
+
+class DomainStoreSnapshot(val eventStore: EventStore, val versionsToSnapshot : Int = 100) : DomainStore {
+	
+	data class Snapshot(val aggregate: Aggregate, val aggregateVersion: Int)
+	
+	val snapshotStore: MutableMap<UUID, Snapshot> = mutableMapOf()
+	
+	@Suppress("UNCHECKED_CAST")
+	override fun <T : Aggregate> getById(aggregateClass: KClass<T>, aggregateId: UUID) : T {
+		val snapshot : Snapshot? = snapshotStore[aggregateId]
+		val fromVersion: Int = snapshot?.aggregateVersion ?: 0
+		
+		val events = eventStore.getEvents(aggregateId, fromVersion)		
+		if (events.isNotEmpty() or (fromVersion>0)) {
+			val aggregate: T = (snapshot?.aggregate ?: aggregateClass.java.newInstance()) as T
+			events.map { it.event }.flatMap { it }.forEach(aggregate::handleEvent)
+			
+			if (events.size==versionsToSnapshot) {
+				snapshotStore[aggregateId] = Snapshot(aggregate, fromVersion + versionsToSnapshot)
+			}
+			aggregate.newEvents.clear()
+			return aggregate
+		}
+		throw IllegalArgumentException("Aggregate $aggregateId not found")
+	}
+	
+	override fun <T : Aggregate> add(aggregate : T) : T {
+		eventStore.store(aggregate.newEvents)
+		return aggregate
+	}	
+		
 }
 
 ///////////////////////
@@ -131,14 +169,11 @@ class CommandUnitOfWork private constructor() {
 
 class DomainStoreCommandAware(val wrappedDomainStore: DomainStore) : DomainStore {
 	
-	val defaultLockTimeout : Long = 3000
-	
     private val logger = KotlinLogging.logger {}	
 
 	@Suppress("UNCHECKED_CAST")
 	override fun <T : Aggregate> getById(aggregateClass: KClass<T>, aggregateId: UUID) : T {
 		val lock = CommandUnitOfWork.locks.computeIfAbsent(aggregateId) {ReentrantLock()}
-//		lock.tryLock(defaultLockTimeout, TimeUnit.MILLISECONDS)
 		lock.lock()
 		logger.trace { "Acquired lock $lock for aggregate $aggregateId with hold count ${lock.holdCount}" }
 		CommandUnitOfWork.current.lockIds.add(aggregateId)
@@ -177,6 +212,7 @@ class CommandDispatcher(val eventStore: EventStore) {
         logger.info {"Command handler for $commandClass registered"}
 	}
 
+	@Suppress("UNCHECKED_CAST")
 	fun <R: Any> invokeCommandWithResult(command: Any) : R {
         CommandUnitOfWork.current.clear()
         try {
@@ -186,6 +222,9 @@ class CommandDispatcher(val eventStore: EventStore) {
             logger.debug { "Command $command generated events ${CommandUnitOfWork.current.events}" }
             CommandUnitOfWork.current.events.let(eventStore::store)
             return commandResult
+		} catch (e: Exception) {
+			logger.error { e }
+			throw e
         } finally {
             CommandUnitOfWork.current.clear()
         }

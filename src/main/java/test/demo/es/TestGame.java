@@ -10,10 +10,9 @@ public class TestGame {
     public static void main(String[] args) {
 //        System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "TRACE");
 
-        long startTime = System.nanoTime();
 
         EventStore eventStore = new EventStore();
-        DomainStore domainStore = new DomainStoreCommandAware(new DomainStoreSimple(eventStore));
+        DomainStore domainStore = new DomainStoreCommandAware(new DomainStoreSnapshot(eventStore, 100));
         CommandDispatcher commandDispatcher = new CommandDispatcher(eventStore);
 
         commandDispatcher.registerHandler(JvmClassMappingKt.getKotlinClass(CreateGameCommand.class), new CommandHandler<CreateGameCommand, UUID>() {
@@ -41,11 +40,14 @@ public class TestGame {
         UUID gameId = commandDispatcher.invokeCommandWithResult(new CreateGameCommand());
         System.out.println(gameId);
 
-        for (int i=0; i<5400; i++) {
+        long startTime = System.currentTimeMillis();
+        
+        for (int i=0; i < 1_000_000; i++) {
             commandDispatcher.invokeCommandWithResult(new StartGameCommand(gameId));
             commandDispatcher.invokeCommandWithResult(new FinishGameCommand(gameId));
         }
 
+        System.out.println(System.currentTimeMillis() - startTime);
     }
 
 }

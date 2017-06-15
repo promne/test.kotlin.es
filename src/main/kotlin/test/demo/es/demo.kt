@@ -19,7 +19,8 @@ data class CounterLimitSetEvent(val id: UUID, val limit: Long) : Event(id)
 
 class CounterAggregate() : Aggregate() {
 
-    private var counter: Long = 0
+    var counter: Long = 0
+    		private set
 
     private var maximumValue: Long = Long.MAX_VALUE
 
@@ -40,8 +41,6 @@ class CounterAggregate() : Aggregate() {
     protected fun handleIncreased(event: CounterIncreasedEvent) {
         counter = event.newValue;
     }
-
-    fun getCount() : Long = counter;
 
     fun  setLimit(limit: Long) {
         applyEvent(CounterLimitSetEvent(aggregateId, limit))
@@ -64,6 +63,7 @@ data class CreateCounterCommand(val id: UUID)
 data class SetCounterLimitCommand(val id: UUID, val limit: Long)
 data class IncreaseCounterCommand(val id: UUID, val by: Long = 1)
 data class ResetCounterAndLimitCommand(val id: UUID)
+data class PrintCounterStatsCommand(val id: UUID)
 
 fun main(args: Array<String>) {
 //    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "TRACE")
@@ -75,7 +75,8 @@ fun main(args: Array<String>) {
     // create components
     val eventStore : EventStore = EventStore()
 	val domainStoreSimple: DomainStore = DomainStoreSimple(eventStore)
-    val domainStore: DomainStore = DomainStoreCommandAware(domainStoreSimple)
+	val domainStoreSnapshot: DomainStore = DomainStoreSnapshot(eventStore)
+    val domainStore: DomainStore = DomainStoreCommandAware(domainStoreSnapshot)
     val commandDispatcher = CommandDispatcher(eventStore)
 
     // register command handlers
@@ -92,13 +93,17 @@ fun main(args: Array<String>) {
     commandDispatcher.registerHandler(IncreaseCounterCommand::class) {		
         val counterAggregate = domainStore.getById(CounterAggregate::class, it.id)
         counterAggregate.increase(it.by)
-        counterAggregate.getCount()
+        counterAggregate.counter
+    }
+    commandDispatcher.registerHandler(PrintCounterStatsCommand::class) {		
+    	val counterAggregate = domainStore.getById(CounterAggregate::class, it.id)
+		logger.info { "Aggregate ${counterAggregate.aggregateId} value: ${counterAggregate.counter} from domainStore: ${domainStoreSnapshot.getById(CounterAggregate::class, it.id).counter} with events count: ${eventStore.getEvents(it.id).size}" }				
     }
 
     // issue few commands
-	val aggregateCount = 5
+	val aggregateCount = 10
     val tasksCount = 400
-    val iterationsPerTask = 500
+    val iterationsPerTask = 1000
 	val executor = Executors.newFixedThreadPool(8)
 	val completionService = ExecutorCompletionService<Unit>(executor);
 
@@ -115,12 +120,15 @@ fun main(args: Array<String>) {
 				counterIds.map { cid -> IncreaseCounterCommand(cid) }.forEach(commandDispatcher::invokeCommand)
 			}
 			val taskRunTime = System.currentTimeMillis() - taskStartTime
-			counterIds.forEach {
-				logger.info { "Aggregate $it value from domainStore: ${domainStoreSimple.getById(CounterAggregate::class, it).getCount()} with events count: ${eventStore.getEvents(it).size}" }				
+			counterIds.map { cid -> PrintCounterStatsCommand(cid) }.forEach(commandDispatcher::invokeCommand)
+			//only the last one will be accurate - due to threaded nature
+			logger.info {
+				StringBuilder()
+					.appendln("Stats:")	
+					.appendln("Event store size: ${eventStore.storeSize}")
+					.appendln("Locks (${CommandUnitOfWork.locks.size}): ${CommandUnitOfWork.locks}")
+					.appendln("Task run time $taskRunTime ms")
 			}
-			logger.info { "Event store size: ${eventStore.events.size}" }
-			logger.info { "Locks (${CommandUnitOfWork.locks.size}): ${CommandUnitOfWork.locks}" }
-			logger.info { "Task run time $taskRunTime ms" }
 		}
 	}
 	
@@ -129,6 +137,9 @@ fun main(args: Array<String>) {
 	}
 	executor.shutdown()
 	
+	counterIds.forEach {
+		logger.info { "Aggregate $it value from domainStore: ${domainStoreSimple.getById(CounterAggregate::class, it).counter} with events count: ${eventStore.getEvents(it).size}" }				
+	}
 	logger.info { "Locks: ${CommandUnitOfWork.locks}" }
 	
 	
