@@ -40,9 +40,17 @@ abstract class Aggregate() {
 
 data class Timestamp(val i: Long = System.nanoTime())
 
-data class StoredEvent(val aggregateId: UUID, val timestamp: Timestamp, val event: List<Event>)
+data class StoredEvent(val aggregateId: UUID, val timestamp: Timestamp, val events: List<Event>)
 
-class EventStore {
+interface EventStore {
+	
+	fun getEvents(aggregateId: UUID, fromVersion: Int) : List<StoredEvent>
+	
+	fun store(allEvents: List<Event>)
+		
+}
+
+class EventStoreInMemory : EventStore {
     private val logger = KotlinLogging.logger {}
 
     //in memory
@@ -50,9 +58,9 @@ class EventStore {
 	
 	private fun getAggregateEventsList(aggregateId: UUID) : MutableList<StoredEvent> = events.computeIfAbsent(aggregateId) { Collections.synchronizedList(ArrayList()) }
 	
-	fun getEvents(aggregateId: UUID, fromVersion: Int=0) : List<StoredEvent> = getAggregateEventsList(aggregateId).drop(fromVersion)
+	override fun getEvents(aggregateId: UUID, fromVersion: Int) : List<StoredEvent> = getAggregateEventsList(aggregateId).drop(fromVersion)
 	
-	fun store(allEvents: List<Event>) {
+	override fun store(allEvents: List<Event>) {
         allEvents.groupingBy { it.aggregateId }.fold(listOf<Event>()){ l,e -> l + e }.forEach { aggregateEvents ->
             StoredEvent(aggregateEvents.key, Timestamp(), aggregateEvents.value).let {
                 logger.trace { "Storing event $it" }
@@ -75,10 +83,10 @@ interface DomainStore {
 class DomainStoreSimple(val eventStore: EventStore) : DomainStore {
 
 	override fun <T : Aggregate> getById(aggregateClass: KClass<T>, aggregateId: UUID) : T {	
-		val events = eventStore.getEvents(aggregateId)
+		val events = eventStore.getEvents(aggregateId, 0)
 		if (events.isNotEmpty()) {
 			val newAggregate: T = aggregateClass.java.newInstance()
-			events.map { it.event }.flatMap { it }.forEach(newAggregate::handleEvent)
+			events.map { it.events }.flatMap { it }.forEach(newAggregate::handleEvent)
 			return newAggregate
 		}
 		throw IllegalArgumentException("Aggregate $aggregateId not found")
@@ -105,7 +113,7 @@ class DomainStoreSnapshot(val eventStore: EventStore, val versionsToSnapshot : I
 		val events = eventStore.getEvents(aggregateId, fromVersion)		
 		if (events.isNotEmpty() or (fromVersion>0)) {
 			val aggregate: T = (snapshot?.aggregate ?: aggregateClass.java.newInstance()) as T
-			events.map { it.event }.flatMap { it }.forEach(aggregate::handleEvent)
+			events.map { it.events }.flatMap { it }.forEach(aggregate::handleEvent)
 			
 			if (events.size==versionsToSnapshot) {
 				snapshotStore[aggregateId] = Snapshot(aggregate, fromVersion + versionsToSnapshot)

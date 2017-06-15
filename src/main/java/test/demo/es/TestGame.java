@@ -11,7 +11,7 @@ public class TestGame {
 //        System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "TRACE");
 
 
-        EventStore eventStore = new EventStore();
+        EventStore eventStore = new EventStoreInMemory();
         DomainStore domainStore = new DomainStoreCommandAware(new DomainStoreSnapshot(eventStore, 100));
         CommandDispatcher commandDispatcher = new CommandDispatcher(eventStore);
 

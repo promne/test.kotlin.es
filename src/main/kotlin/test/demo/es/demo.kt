@@ -7,15 +7,16 @@ import java.util.concurrent.Future
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.ExecutorCompletionService
+import EventStoreCouchDB
 
 //////////////////////////////
 // Show time
 //////////////////////////////
 
-data class CounterCreatedEvent(val id: UUID) : Event(id)
-data class CounterIncreasedEvent(val id: UUID, val newValue: Long) : Event(id)
-data class CounterResetEvent(val id: UUID) : Event(id)
-data class CounterLimitSetEvent(val id: UUID, val limit: Long) : Event(id)
+class CounterCreatedEvent(id: UUID) : Event(id)
+class CounterIncreasedEvent(id: UUID, val newValue: Long) : Event(id)
+class CounterResetEvent(id: UUID) : Event(id)
+class CounterLimitSetEvent(id: UUID, val limit: Long) : Event(id)
 
 class CounterAggregate() : Aggregate() {
 
@@ -66,14 +67,16 @@ data class ResetCounterAndLimitCommand(val id: UUID)
 data class PrintCounterStatsCommand(val id: UUID)
 
 fun main(args: Array<String>) {
-//    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "TRACE")
+    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "TRACE")
     System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "HH:mm:ss.SSS")
     System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")
 
     val logger = KotlinLogging.logger {}
 	
     // create components
-    val eventStore : EventStore = EventStore()
+//    val eventStore = EventStoreInMemory()
+	val eventStore = EventStoreCouchDB.connectToDb("http://192.168.56.101:5984","eventStoreKotlin")
+	
 	val domainStoreSimple: DomainStore = DomainStoreSimple(eventStore)
 	val domainStoreSnapshot: DomainStore = DomainStoreSnapshot(eventStore)
     val domainStore: DomainStore = DomainStoreCommandAware(domainStoreSnapshot)
@@ -97,13 +100,13 @@ fun main(args: Array<String>) {
     }
     commandDispatcher.registerHandler(PrintCounterStatsCommand::class) {		
     	val counterAggregate = domainStore.getById(CounterAggregate::class, it.id)
-		logger.info { "Aggregate ${counterAggregate.aggregateId} value: ${counterAggregate.counter} from domainStore: ${domainStoreSnapshot.getById(CounterAggregate::class, it.id).counter} with events count: ${eventStore.getEvents(it.id).size}" }				
+		logger.info { "Aggregate ${counterAggregate.aggregateId} value: ${counterAggregate.counter} from domainStore: ${domainStoreSnapshot.getById(CounterAggregate::class, it.id).counter} with events count: ${eventStore.getEvents(it.id, 0).size}" }				
     }
 
     // issue few commands
-	val aggregateCount = 10
-    val tasksCount = 400
-    val iterationsPerTask = 1000
+	val aggregateCount = 1
+    val tasksCount = 1
+    val iterationsPerTask = 1
 	val executor = Executors.newFixedThreadPool(8)
 	val completionService = ExecutorCompletionService<Unit>(executor);
 
@@ -125,7 +128,7 @@ fun main(args: Array<String>) {
 			logger.info {
 				StringBuilder()
 					.appendln("Stats:")	
-					.appendln("Event store size: ${eventStore.storeSize}")
+//					.appendln("Event store size: ${eventStore.storeSize}")
 					.appendln("Locks (${CommandUnitOfWork.locks.size}): ${CommandUnitOfWork.locks}")
 					.appendln("Task run time $taskRunTime ms")
 			}
@@ -138,7 +141,7 @@ fun main(args: Array<String>) {
 	executor.shutdown()
 	
 	counterIds.forEach {
-		logger.info { "Aggregate $it value from domainStore: ${domainStoreSimple.getById(CounterAggregate::class, it).counter} with events count: ${eventStore.getEvents(it).size}" }				
+		logger.info { "Aggregate $it value from domainStore: ${domainStoreSimple.getById(CounterAggregate::class, it).counter} with events count: ${eventStore.getEvents(it,0).size}" }				
 	}
 	logger.info { "Locks: ${CommandUnitOfWork.locks}" }
 	
