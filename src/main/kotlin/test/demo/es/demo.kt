@@ -1,22 +1,20 @@
 package test.demo.es
 
-import mu.KotlinLogging
-import java.lang.IllegalArgumentException
-import java.util.*
-import java.util.concurrent.Future
-import java.util.concurrent.Executor
-import java.util.concurrent.Executors
-import java.util.concurrent.ExecutorCompletionService
 import EventStoreCouchDB
+import com.fasterxml.jackson.annotation.JsonProperty
+import mu.KotlinLogging
+import java.util.UUID
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.Executors
 
 //////////////////////////////
 // Show time
 //////////////////////////////
 
-class CounterCreatedEvent(id: UUID) : Event(id)
-class CounterIncreasedEvent(id: UUID, val newValue: Long) : Event(id)
-class CounterResetEvent(id: UUID) : Event(id)
-class CounterLimitSetEvent(id: UUID, val limit: Long) : Event(id)
+class CounterCreatedEvent(@JsonProperty("aggregateId") id: UUID) : Event(id)
+class CounterIncreasedEvent(@JsonProperty("aggregateId")id: UUID, @JsonProperty("newValue") val newValue: Long) : Event(id)
+class CounterResetEvent(@JsonProperty("aggregateId")id: UUID) : Event(id)
+class CounterLimitSetEvent(@JsonProperty("aggregateId")id: UUID, @JsonProperty("limit") val limit: Long) : Event(id)
 
 class CounterAggregate() : Aggregate() {
 
@@ -67,9 +65,12 @@ data class ResetCounterAndLimitCommand(val id: UUID)
 data class PrintCounterStatsCommand(val id: UUID)
 
 fun main(args: Array<String>) {
-    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "TRACE")
+//    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "INFO")
+//    System.setProperty("org.slf4j.simpleLogger.log.test.demo.es", "TRACE")
     System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "HH:mm:ss.SSS")
     System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")
+
+	System.setProperty("org.ektorp.support.AutoUpdateViewOnChange", "true")
 
     val logger = KotlinLogging.logger {}
 	
@@ -78,13 +79,15 @@ fun main(args: Array<String>) {
 	val eventStore = EventStoreCouchDB.connectToDb("http://192.168.56.101:5984","eventStoreKotlin")
 	
 	val domainStoreSimple: DomainStore = DomainStoreSimple(eventStore)
-	val domainStoreSnapshot: DomainStore = DomainStoreSnapshot(eventStore)
+	val domainStoreSnapshot: DomainStore = DomainStoreSnapshotInMemory(eventStore)
     val domainStore: DomainStore = DomainStoreCommandAware(domainStoreSnapshot)
     val commandDispatcher = CommandDispatcher(eventStore)
 
     // register command handlers
     commandDispatcher.registerHandler(CreateCounterCommand::class) {
-		domainStore.add(CounterAggregate(it.id)).aggregateId
+		val aggregate = domainStore.add(CounterAggregate(it.id))
+		aggregate.increase()
+		aggregate.aggregateId
 	}
     commandDispatcher.registerHandler(SetCounterLimitCommand::class) { domainStore.getById(CounterAggregate::class, it.id).setLimit(it.limit) }
     commandDispatcher.registerHandler(ResetCounterAndLimitCommand::class) { command ->
@@ -105,9 +108,9 @@ fun main(args: Array<String>) {
 
     // issue few commands
 	val aggregateCount = 1
-    val tasksCount = 1
-    val iterationsPerTask = 1
-	val executor = Executors.newFixedThreadPool(8)
+    val tasksCount = 400
+    val iterationsPerTask = 100
+	val executor = Executors.newFixedThreadPool(1)
 	val completionService = ExecutorCompletionService<Unit>(executor);
 
 	
@@ -123,7 +126,7 @@ fun main(args: Array<String>) {
 				counterIds.map { cid -> IncreaseCounterCommand(cid) }.forEach(commandDispatcher::invokeCommand)
 			}
 			val taskRunTime = System.currentTimeMillis() - taskStartTime
-			counterIds.map { cid -> PrintCounterStatsCommand(cid) }.forEach(commandDispatcher::invokeCommand)
+//			counterIds.map { cid -> PrintCounterStatsCommand(cid) }.forEach(commandDispatcher::invokeCommand)
 			//only the last one will be accurate - due to threaded nature
 			logger.info {
 				StringBuilder()

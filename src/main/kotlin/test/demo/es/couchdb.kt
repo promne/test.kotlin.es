@@ -14,35 +14,35 @@ import test.demo.es.Timestamp
 import java.util.UUID
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonInclude.Include
+import org.ektorp.ViewQuery
+import org.ektorp.support.CouchDbDocument
+import org.ektorp.support.View
 
 class EventStoreCouchDB(val db : CouchDbConnector) : EventStore {
 
-	@JsonInclude(Include.NON_NULL)
-	class CouchDbStoredEvent() {
-		
-		@JsonProperty("_id")
-		var id: String? = null 
-
-		@JsonProperty("_rev")
-		var revision: String? = null
-		 
-		var aggregateId: UUID? = null
-		var timestamp: Timestamp? = null
-		var events: List<Event>? = null
+	data class CouchDbStoredEvent(
+		@JsonProperty("aggregateId") val aggregateId: UUID,
+		@JsonProperty("timestamp") val timestamp: Timestamp,
+		@JsonProperty("events") val events: List<Event>
+	) : CouchDbDocument()
 				
-		constructor(aggregateId: UUID, timestamp: Timestamp, events: List<Event>) : this() {
-			this.aggregateId = aggregateId
-			this.timestamp = timestamp
-			this.events = events
+	class MyRepo(db : CouchDbConnector) : CouchDbRepositorySupport<CouchDbStoredEvent>(CouchDbStoredEvent::class.java, db) {
+		
+		init {
+			this.initStandardDesignDocument()
 		}
 		
-	}
-	
-	class MyRepo(val db : CouchDbConnector) : CouchDbRepositorySupport<CouchDbStoredEvent>(CouchDbStoredEvent::class.java, db) {
+		protected fun queryView(viewName: String, key: String, skip: Int) : List<CouchDbStoredEvent> {
+			return db.queryView(createQuery(viewName)
+								.includeDocs(true)
+								.key(key)
+								.skip(skip),
+							type);
+		}
 		
-		@GenerateView
-	    fun findByAggregateId(aggregateId: UUID) : List<CouchDbStoredEvent> {
-	        return queryView("by_aggregateId", aggregateId.toString());
+		@View(name="by_aggregateId", map = "function(doc) {emit(doc.aggregateId, doc)}")
+	    fun findByAggregateId(aggregateId: UUID, skip: Int) : List<CouchDbStoredEvent> {
+	        return queryView("by_aggregateId", aggregateId.toString(), skip);
 	    }
 	} 
 	
@@ -61,10 +61,7 @@ class EventStoreCouchDB(val db : CouchDbConnector) : EventStore {
 	}
 	
 	override fun getEvents(aggregateId: UUID, fromVersion: Int): List<StoredEvent> {
-		logger.info { repository.all }
-		logger.info { repository.findByAggregateId(aggregateId) }
-		
-		TODO()
+		return repository.findByAggregateId(aggregateId, fromVersion).map { StoredEvent(it.aggregateId, it.timestamp, it.events) }
 	}
 
 	override fun store(allEvents: List<Event>) {

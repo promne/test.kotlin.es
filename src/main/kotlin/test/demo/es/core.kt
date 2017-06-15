@@ -12,11 +12,17 @@ import java.util.concurrent.locks.Lock
 import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.TimeUnit
 import java.lang.reflect.Type
+import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.annotation.JsonTypeInfo
+import com.fasterxml.jackson.annotation.JsonTypeInfo.Id
 
 /////////////////
 /// Event sourcing
 /////////////////
-open class Event(val aggregateId: UUID)
+@JsonTypeInfo(use = Id.CLASS,
+              include = JsonTypeInfo.As.PROPERTY,
+              property = "eventType")
+open class Event(@JsonProperty("aggregateId") val aggregateId: UUID)
 
 
 abstract class Aggregate() {
@@ -99,7 +105,7 @@ class DomainStoreSimple(val eventStore: EventStore) : DomainStore {
 	
 }
 
-class DomainStoreSnapshot(val eventStore: EventStore, val versionsToSnapshot : Int = 100) : DomainStore {
+class DomainStoreSnapshotInMemory(val eventStore: EventStore, val versionsToSnapshot : Int = 100) : DomainStore {
 	
 	data class Snapshot(val aggregate: Aggregate, val aggregateVersion: Int)
 	

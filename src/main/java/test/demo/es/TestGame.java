@@ -12,7 +12,7 @@ public class TestGame {
 
 
         EventStore eventStore = new EventStoreInMemory();
-        DomainStore domainStore = new DomainStoreCommandAware(new DomainStoreSnapshot(eventStore, 100));
+        DomainStore domainStore = new DomainStoreCommandAware(new DomainStoreSnapshotInMemory(eventStore, 100));
         CommandDispatcher commandDispatcher = new CommandDispatcher(eventStore);
 
         commandDispatcher.registerHandler(JvmClassMappingKt.getKotlinClass(CreateGameCommand.class), new CommandHandler<CreateGameCommand, UUID>() {
