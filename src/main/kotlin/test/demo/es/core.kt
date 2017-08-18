@@ -15,6 +15,7 @@ import java.lang.reflect.Type
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonTypeInfo
 import com.fasterxml.jackson.annotation.JsonTypeInfo.Id
+import com.fasterxml.jackson.annotation.JsonIgnore
 
 /////////////////
 /// Event sourcing
@@ -30,12 +31,20 @@ abstract class Aggregate() {
 	var aggregateId = UUID.nameUUIDFromBytes(ByteArray(0))
 			protected set
 	
+	@Transient
 	val eventHandlerMethodCache : MutableMap<Class<Event>, Method> = mutableMapOf()
+		@JsonIgnore
+		get
+		
 	fun handleEvent(event: Event) {
 		eventHandlerMethodCache.getOrPut(event.javaClass) { this.javaClass.declaredMethods.single { it.parameterCount==1 && it.parameterTypes[0]==event.javaClass }}.invoke(this, event)
 	}
 	
+	@Transient
 	val newEvents : MutableList<Event> = mutableListOf()
+		@JsonIgnore
+		get
+	
 	fun applyEvent(event: Event) {
 		newEvents.add(event)
 		this.handleEvent(event)
@@ -223,7 +232,7 @@ class CommandDispatcher(val eventStore: EventStore) {
 	fun <T: Any, R: Any> registerHandler(commandClass: KClass<T>, commandHandler: CommandHandler<T, R>) {
 		handlers[commandClass]?.let { throw IllegalArgumentException("Command has been already registered: $commandClass") }
 		handlers[commandClass] = commandHandler
-        logger.info {"Command handler for $commandClass registered"}
+        logger.info {"Command handler for $commandClass registered in $this"}
 	}
 
 	@Suppress("UNCHECKED_CAST")

@@ -17,6 +17,13 @@ import com.fasterxml.jackson.annotation.JsonInclude.Include
 import org.ektorp.ViewQuery
 import org.ektorp.support.CouchDbDocument
 import org.ektorp.support.View
+import test.demo.es.DomainStore
+import test.demo.es.Aggregate
+import kotlin.reflect.KClass
+import org.ektorp.DocumentNotFoundException
+import org.ektorp.impl.StdObjectMapperFactory
+import com.fasterxml.jackson.annotation.JsonTypeInfo
+import com.fasterxml.jackson.annotation.JsonTypeInfo.Id
 
 class EventStoreCouchDB(val db : CouchDbConnector) : EventStore {
 
@@ -73,4 +80,60 @@ class EventStoreCouchDB(val db : CouchDbConnector) : EventStore {
         }
 	}
 
+}
+
+class DomainStoreSnapshotCouchDB(val db : CouchDbConnector, val eventStore: EventStore, val versionsToSnapshot : Int = 100) : DomainStore {
+
+	data class CouchDBAggregateSnapshot(
+			@JsonTypeInfo(use = Id.CLASS,
+			include = JsonTypeInfo.As.PROPERTY,
+			property = "aggregateClass")
+			@JsonProperty("aggregate") val aggregate: Aggregate,
+			@JsonProperty("aggregateVersion") val aggregateVersion: Int)
+	 : CouchDbDocument()
+	
+	companion object {
+		fun connectToDb(url: String, dbName: String, eventStore: EventStore) : DomainStoreSnapshotCouchDB {
+			val httpClient = StdHttpClient.Builder().url(url).build()
+			val dbInstance = StdCouchDbInstance(httpClient)
+			val dbConnector = StdCouchDbConnector(dbName, dbInstance)
+			dbConnector.createDatabaseIfNotExists()
+			return DomainStoreSnapshotCouchDB(dbConnector, eventStore, 5)
+		}
+	}
+	
+	private val logger = KotlinLogging.logger {}
+	
+	override fun <T : Aggregate> add(aggregate : T) : T {
+		eventStore.store(aggregate.newEvents)
+		return aggregate
+	}	
+
+	@Suppress("UNCHECKED_CAST")
+	override fun <T : Aggregate> getById(aggregateClass: KClass<T>, aggregateId: UUID): T {
+		val snapshot : CouchDBAggregateSnapshot? = try { db.find(CouchDBAggregateSnapshot::class.java, aggregateId.toString()) } catch (e: DocumentNotFoundException) { null }
+		val fromVersion: Int = snapshot?.aggregateVersion ?: 0
+		
+		val events = eventStore.getEvents(aggregateId, fromVersion)		
+		if (events.isNotEmpty() or (fromVersion>0)) {
+			val aggregate: T = (snapshot?.aggregate ?: aggregateClass.java.newInstance()) as T
+			events.map { it.events }.flatMap { it }.forEach(aggregate::handleEvent)
+			
+			if (events.size==versionsToSnapshot) {
+				val snapshotToStore = CouchDBAggregateSnapshot(aggregate, fromVersion + versionsToSnapshot)
+				snapshot?.let {
+					snapshotToStore.id = it.id
+					snapshotToStore.revision = it.revision
+				}
+				logger.trace { "Updating snapshot of ${snapshotToStore.id}"}
+				db.create(aggregate.aggregateId.toString(), snapshotToStore)
+			}
+			aggregate.newEvents.clear()
+			return aggregate
+		}
+		throw IllegalArgumentException("Aggregate $aggregateId not found")
+		
+		
+	}
+	
 }

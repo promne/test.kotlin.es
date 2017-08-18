@@ -6,6 +6,8 @@ import mu.KotlinLogging
 import java.util.UUID
 import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.Executors
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 
 //////////////////////////////
 // Show time
@@ -64,6 +66,11 @@ data class IncreaseCounterCommand(val id: UUID, val by: Long = 1)
 data class ResetCounterAndLimitCommand(val id: UUID)
 data class PrintCounterStatsCommand(val id: UUID)
 
+fun formatTimeMs(time: Long) : String {
+	return ""
+}
+
+
 fun main(args: Array<String>) {
 //    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "INFO")
 //    System.setProperty("org.slf4j.simpleLogger.log.test.demo.es", "TRACE")
@@ -76,11 +83,13 @@ fun main(args: Array<String>) {
 	
     // create components
 //    val eventStore = EventStoreInMemory()
-	val eventStore = EventStoreCouchDB.connectToDb("http://192.168.56.101:5984","eventStoreKotlin")
+	val eventStore = EventStoreCouchDB.connectToDb("http://192.168.56.51:5984","eventStoreKotlin")
 	
 	val domainStoreSimple: DomainStore = DomainStoreSimple(eventStore)
-	val domainStoreSnapshot: DomainStore = DomainStoreSnapshotInMemory(eventStore)
-    val domainStore: DomainStore = DomainStoreCommandAware(domainStoreSnapshot)
+//	val domainStoreSnapshot: DomainStore = DomainStoreSnapshotInMemory(eventStore)
+	val domainStoreSnapshot: DomainStore = DomainStoreSnapshotCouchDB.connectToDb("http://192.168.56.51:5984","snapshotStoreKotlin", eventStore)
+    
+	val domainStore: DomainStore = DomainStoreCommandAware(domainStoreSnapshot)
     val commandDispatcher = CommandDispatcher(eventStore)
 
     // register command handlers
@@ -107,12 +116,15 @@ fun main(args: Array<String>) {
     }
 
     // issue few commands
-	val aggregateCount = 1
-    val tasksCount = 400
-    val iterationsPerTask = 100
-	val executor = Executors.newFixedThreadPool(1)
+	val aggregateCount = 1000
+	val iterationsPerTask = 10
+    val tasksCount = 3000
+	val executor = Executors.newFixedThreadPool(40)
 	val completionService = ExecutorCompletionService<Unit>(executor);
 
+	val startTime = System.currentTimeMillis()
+	var commandCounter = AtomicInteger()
+	var taskCounter = AtomicInteger()
 	
 	val counterIds : List<UUID> = (1..aggregateCount).asIterable()
 			.map{UUID.randomUUID()}
@@ -122,10 +134,18 @@ fun main(args: Array<String>) {
     (1..tasksCount).forEach{
 		completionService.submit {
 			val taskStartTime = System.currentTimeMillis()
+			val randomIds : MutableList<UUID> = counterIds.toMutableList()
+			Collections.shuffle(randomIds)
 			(1..iterationsPerTask).forEach{
-				counterIds.map { cid -> IncreaseCounterCommand(cid) }.forEach(commandDispatcher::invokeCommand)
+				randomIds.map { cid -> IncreaseCounterCommand(cid) }.forEach{
+					commandDispatcher.invokeCommand(it)
+					commandCounter.addAndGet(1)
+				}
 			}
+			taskCounter.addAndGet(1)
 			val taskRunTime = System.currentTimeMillis() - taskStartTime
+			val totalRunTime = System.currentTimeMillis() - startTime
+			
 //			counterIds.map { cid -> PrintCounterStatsCommand(cid) }.forEach(commandDispatcher::invokeCommand)
 			//only the last one will be accurate - due to threaded nature
 			logger.info {
@@ -133,7 +153,9 @@ fun main(args: Array<String>) {
 					.appendln("Stats:")	
 //					.appendln("Event store size: ${eventStore.storeSize}")
 					.appendln("Locks (${CommandUnitOfWork.locks.size}): ${CommandUnitOfWork.locks}")
-					.appendln("Task run time $taskRunTime ms")
+					.appendln("Task run time $taskRunTime ms (${iterationsPerTask * counterIds.size} commands, ${taskRunTime/(iterationsPerTask * counterIds.size)} ms per command)")
+					.appendln("Total run time $totalRunTime ms (${commandCounter.get()} commands, ${totalRunTime / commandCounter.get()} ms per command)")
+					.appendln("Remaining tasks count ${tasksCount-taskCounter.get()} (${ (tasksCount-taskCounter.get()) * (totalRunTime/taskCounter.get()) } ms)")
 			}
 		}
 	}
